@@ -1,8 +1,8 @@
 import React from 'react';
 import { EventsWithValidation, regexValidation, LegacyForms } from '@grafana/ui';
-const { Select, Input, FormField, Switch } = LegacyForms;
+const { Select, Input, FormField } = LegacyForms;
 import { ElasticsearchOptions } from '../types';
-import { DataSourceSettings, onUpdateDatasourceJsonDataOptionChecked, SelectableValue } from '@grafana/data';
+import { DataSourceSettings, SelectableValue } from '@grafana/data';
 
 const indexPatternTypes = [
   { label: 'No pattern', value: 'none' },
@@ -34,7 +34,7 @@ export const ElasticDetails = (props: Props) => {
 
       <div className="gf-form-group">
         <div className="gf-form-inline">
-          <div className="gf-form max-width-25">
+          <div className="gf-form">
             <FormField
               labelWidth={10}
               inputWidth={15}
@@ -46,7 +46,7 @@ export const ElasticDetails = (props: Props) => {
             />
           </div>
 
-          <div className="gf-form width-14">
+          <div className="gf-form">
             <FormField
               labelWidth={10}
               label="Pattern"
@@ -76,32 +76,30 @@ export const ElasticDetails = (props: Props) => {
         </div>
 
         <div className="gf-form">
-          <span className="gf-form-select-wrapper">
-            <FormField
-              labelWidth={10}
-              label="Version"
-              inputEl={
-                <Select
-                  options={esVersions}
-                  onChange={option => {
-                    const maxConcurrentShardRequests = getMaxConcurrenShardRequestOrDefault(
-                      value.jsonData.maxConcurrentShardRequests,
-                      option.value!
-                    );
-                    onChange({
-                      ...value,
-                      jsonData: {
-                        ...value.jsonData,
-                        esVersion: option.value!,
-                        maxConcurrentShardRequests,
-                      },
-                    });
-                  }}
-                  value={esVersions.find(version => version.value === value.jsonData.esVersion)}
-                />
-              }
-            />
-          </span>
+          <FormField
+            labelWidth={10}
+            label="Version"
+            inputEl={
+              <Select
+                options={esVersions}
+                onChange={option => {
+                  const maxConcurrentShardRequests = getMaxConcurrenShardRequestOrDefault(
+                    value.jsonData.maxConcurrentShardRequests,
+                    option.value!
+                  );
+                  onChange({
+                    ...value,
+                    jsonData: {
+                      ...value.jsonData,
+                      esVersion: option.value!,
+                      maxConcurrentShardRequests,
+                    },
+                  });
+                }}
+                value={esVersions.find(version => version.value === value.jsonData.esVersion)}
+              />
+            }
+          />
         </div>
         {value.jsonData.esVersion >= 56 && (
           <div className="gf-form max-width-30">
@@ -144,29 +142,11 @@ export const ElasticDetails = (props: Props) => {
             />
           </div>
         </div>
-        {value.jsonData.esVersion >= 70 && (
-          <div className="gf-form-group">
-            <div className="gf-form-inline">
-              <Switch
-                label="Include Frozen Indices"
-                checked={value.jsonData.includeFrozen ?? false}
-                onChange={onUpdateDatasourceJsonDataOptionChecked(
-                  {
-                    options: value,
-                    onOptionsChange: onChange,
-                  },
-                  'includeFrozen'
-                )}
-              />
-            </div>
-          </div>
-        )}
       </div>
     </>
   );
 };
 
-// TODO: Use change handlers from @grafana/data
 const changeHandler = (
   key: keyof DataSourceSettings<ElasticsearchOptions>,
   value: Props['value'],
@@ -178,7 +158,6 @@ const changeHandler = (
   });
 };
 
-// TODO: Use change handlers from @grafana/data
 const jsonDataChangeHandler = (key: keyof ElasticsearchOptions, value: Props['value'], onChange: Props['onChange']) => (
   event: React.SyntheticEvent<HTMLInputElement | HTMLSelectElement>
 ) => {

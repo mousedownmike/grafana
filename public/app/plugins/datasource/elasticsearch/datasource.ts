@@ -1,4 +1,3 @@
-import angular from 'angular';
 import _ from 'lodash';
 import {
   DataSourceApi,
@@ -10,17 +9,28 @@ import {
   DataLink,
   PluginMeta,
   DataQuery,
+  LogRowModel,
+  Field,
+  MetricFindValue,
 } from '@grafana/data';
 import LanguageProvider from './language_provider';
 import { ElasticResponse } from './elastic_response';
 import { IndexPattern } from './index_pattern';
 import { ElasticQueryBuilder } from './query_builder';
 import { toUtc } from '@grafana/data';
-import * as queryDef from './query_def';
-import { getBackendSrv } from '@grafana/runtime';
-import { TemplateSrv } from 'app/features/templating/template_srv';
-import { TimeSrv } from 'app/features/dashboard/services/TimeSrv';
+import { defaultBucketAgg, hasMetricOfType } from './query_def';
+import { getBackendSrv, getDataSourceSrv } from '@grafana/runtime';
+import { getTemplateSrv, TemplateSrv } from 'app/features/templating/template_srv';
+import { getTimeSrv, TimeSrv } from 'app/features/dashboard/services/TimeSrv';
 import { DataLinkConfig, ElasticsearchOptions, ElasticsearchQuery } from './types';
+import { RowContextOptions } from '@grafana/ui/src/components/Logs/LogRowContextProvider';
+import { metricAggregationConfig } from './components/QueryEditor/MetricAggregationsEditor/utils';
+import {
+  isMetricAggregationWithField,
+  isPipelineAggregationWithMultipleBucketPaths,
+} from './components/QueryEditor/MetricAggregationsEditor/aggregations';
+import { bucketAggregationConfig } from './components/QueryEditor/BucketAggregationsEditor/utils';
+import { isBucketAggregationWithField } from './components/QueryEditor/BucketAggregationsEditor/aggregations';
 
 // Those are metadata fields as defined in https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping-fields.html#_identity_metadata_fields.
 // custom fields can start with underscores, therefore is not safe to exclude anything that starts with one.
@@ -52,13 +62,11 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
   logLevelField?: string;
   dataLinks: DataLinkConfig[];
   languageProvider: LanguageProvider;
-  includeFrozen: boolean;
 
-  /** @ngInject */
   constructor(
     instanceSettings: DataSourceInstanceSettings<ElasticsearchOptions>,
-    private templateSrv: TemplateSrv,
-    private timeSrv: TimeSrv
+    private readonly templateSrv: TemplateSrv = getTemplateSrv(),
+    private readonly timeSrv: TimeSrv = getTimeSrv()
   ) {
     super(instanceSettings);
     this.basicAuth = instanceSettings.basicAuth;
@@ -80,7 +88,6 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
     this.logMessageField = settingsData.logMessageField || '';
     this.logLevelField = settingsData.logLevelField || '';
     this.dataLinks = settingsData.dataLinks || [];
-    this.includeFrozen = settingsData.includeFrozen ?? false;
 
     if (this.logMessageField === '') {
       this.logMessageField = undefined;
@@ -238,7 +245,7 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
       header.index = this.indexPattern.getIndexList(options.range.from, options.range.to);
     }
 
-    const payload = angular.toJson(header) + '\n' + angular.toJson(data) + '\n';
+    const payload = JSON.stringify(header) + '\n' + JSON.stringify(data) + '\n';
 
     return this.post('_msearch', payload).then((res: any) => {
       const list = [];
@@ -311,6 +318,11 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
     });
   }
 
+  private interpolateLuceneQuery(queryString: string, scopedVars: ScopedVars) {
+    // Elasticsearch queryString should always be '*' if empty string
+    return this.templateSrv.replace(queryString, scopedVars, 'lucene') || '*';
+  }
+
   interpolateVariablesInQueries(queries: ElasticsearchQuery[], scopedVars: ScopedVars): ElasticsearchQuery[] {
     let expandedQueries = queries;
     if (queries && queries.length > 0) {
@@ -318,8 +330,16 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
         const expandedQuery = {
           ...query,
           datasource: this.name,
-          query: this.templateSrv.replace(query.query, scopedVars, 'lucene'),
+          query: this.interpolateLuceneQuery(query.query || '', scopedVars),
         };
+
+        for (let bucketAgg of query.bucketAggs || []) {
+          if (bucketAgg.type === 'filters') {
+            for (let filter of bucketAgg.settings?.filters || []) {
+              filter.query = this.interpolateLuceneQuery(filter.query, scopedVars);
+            }
+          }
+        }
         return expandedQuery;
       });
     }
@@ -328,7 +348,7 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
 
   testDatasource() {
     // validate that the index exist and has date field
-    return this.getFields({ type: 'date' }).then(
+    return this.getFields('date').then(
       (dateFields: any) => {
         const timeField: any = _.find(dateFields, { text: this.timeField });
         if (!timeField) {
@@ -341,12 +361,8 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
       },
       (err: any) => {
         console.error(err);
-        if (err.data && err.data.error) {
-          let message = angular.toJson(err.data.error);
-          if (err.data.error.reason) {
-            message = err.data.error.reason;
-          }
-          return { status: 'error', message: message };
+        if (err.message) {
+          return { status: 'error', message: err.message };
         } else {
           return { status: 'error', message: err.status };
         }
@@ -365,12 +381,131 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
       queryHeader['max_concurrent_shard_requests'] = this.maxConcurrentShardRequests;
     }
 
-    return angular.toJson(queryHeader);
+    return JSON.stringify(queryHeader);
   }
+
+  getQueryDisplayText(query: ElasticsearchQuery) {
+    // TODO: This might be refactored a bit.
+    const metricAggs = query.metrics;
+    const bucketAggs = query.bucketAggs;
+    let text = '';
+
+    if (query.query) {
+      text += 'Query: ' + query.query + ', ';
+    }
+
+    text += 'Metrics: ';
+
+    text += metricAggs?.reduce((acc, metric) => {
+      const metricConfig = metricAggregationConfig[metric.type];
+
+      let text = metricConfig.label + '(';
+
+      if (isMetricAggregationWithField(metric)) {
+        text += metric.field;
+      }
+      if (isPipelineAggregationWithMultipleBucketPaths(metric)) {
+        text += metric.settings?.script?.replace(new RegExp('params.', 'g'), '');
+      }
+      text += '), ';
+
+      return `${acc} ${text}`;
+    }, '');
+
+    text += bucketAggs?.reduce((acc, bucketAgg, index) => {
+      const bucketConfig = bucketAggregationConfig[bucketAgg.type];
+
+      let text = '';
+      if (index === 0) {
+        text += ' Group by: ';
+      }
+
+      text += bucketConfig.label + '(';
+      if (isBucketAggregationWithField(bucketAgg)) {
+        text += bucketAgg.field;
+      }
+
+      return `${acc} ${text}), `;
+    }, '');
+
+    if (query.alias) {
+      text += 'Alias: ' + query.alias;
+    }
+
+    return text;
+  }
+
+  /**
+   * This method checks to ensure the user is running a 5.0+ cluster. This is
+   * necessary bacause the query being used for the getLogRowContext relies on the
+   * search_after feature.
+   */
+  showContextToggle(): boolean {
+    return this.esVersion > 5;
+  }
+
+  getLogRowContext = async (row: LogRowModel, options?: RowContextOptions): Promise<{ data: DataFrame[] }> => {
+    const sortField = row.dataFrame.fields.find(f => f.name === 'sort');
+    const searchAfter = sortField?.values.get(row.rowIndex) || [row.timeEpochMs];
+    const range = this.timeSrv.timeRange();
+    const direction = options?.direction === 'FORWARD' ? 'asc' : 'desc';
+    const header = this.getQueryHeader('query_then_fetch', range.from, range.to);
+    const limit = options?.limit ?? 10;
+    const esQuery = JSON.stringify({
+      size: limit,
+      query: {
+        bool: {
+          filter: [
+            {
+              range: {
+                [this.timeField]: {
+                  gte: range.from.valueOf(),
+                  lte: range.to.valueOf(),
+                  format: 'epoch_millis',
+                },
+              },
+            },
+          ],
+        },
+      },
+      sort: [{ [this.timeField]: direction }, { _doc: direction }],
+      search_after: searchAfter,
+    });
+    const payload = [header, esQuery].join('\n') + '\n';
+    const url = this.getMultiSearchUrl();
+    const response = await this.post(url, payload);
+    const targets: ElasticsearchQuery[] = [{ refId: `${row.dataFrame.refId}`, metrics: [], isLogsQuery: true }];
+    const elasticResponse = new ElasticResponse(targets, transformHitsBasedOnDirection(response, direction));
+    const logResponse = elasticResponse.getLogs(this.logMessageField, this.logLevelField);
+    const dataFrame = _.first(logResponse.data);
+    if (!dataFrame) {
+      return { data: [] };
+    }
+    /**
+     * The LogRowContextProvider requires there is a field in the dataFrame.fields
+     * named `ts` for timestamp and `line` for the actual log line to display.
+     * Unfortunatly these fields are hardcoded and are required for the lines to
+     * be properly displayed. This code just copies the fields based on this.timeField
+     * and this.logMessageField and recreates the dataFrame so it works.
+     */
+    const timestampField = dataFrame.fields.find((f: Field) => f.name === this.timeField);
+    const lineField = dataFrame.fields.find((f: Field) => f.name === this.logMessageField);
+    if (timestampField && lineField) {
+      return {
+        data: [
+          {
+            ...dataFrame,
+            fields: [...dataFrame.fields, { ...timestampField, name: 'ts' }, { ...lineField, name: 'line' }],
+          },
+        ],
+      };
+    }
+    return logResponse;
+  };
 
   query(options: DataQueryRequest<ElasticsearchQuery>): Promise<DataQueryResponse> {
     let payload = '';
-    const targets = _.cloneDeep(options.targets);
+    const targets = this.interpolateVariablesInQueries(_.cloneDeep(options.targets), options.scopedVars);
     const sentTargets: ElasticsearchQuery[] = [];
 
     // add global adhoc filters to timeFilter
@@ -381,28 +516,22 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
         continue;
       }
 
-      let queryString = this.templateSrv.replace(target.query, options.scopedVars, 'lucene');
-      // Elasticsearch queryString should always be '*' if empty string
-      if (!queryString || queryString === '') {
-        queryString = '*';
-      }
-
       let queryObj;
-      if (target.isLogsQuery || queryDef.hasMetricOfType(target, 'logs')) {
-        target.bucketAggs = [queryDef.defaultBucketAgg()];
+      if (target.isLogsQuery || hasMetricOfType(target, 'logs')) {
+        target.bucketAggs = [defaultBucketAgg()];
         target.metrics = [];
         // Setting this for metrics queries that are typed as logs
         target.isLogsQuery = true;
-        queryObj = this.queryBuilder.getLogsQuery(target, adhocFilters, queryString);
+        queryObj = this.queryBuilder.getLogsQuery(target, adhocFilters, target.query);
       } else {
         if (target.alias) {
           target.alias = this.templateSrv.replace(target.alias, options.scopedVars, 'lucene');
         }
 
-        queryObj = this.queryBuilder.build(target, adhocFilters, queryString);
+        queryObj = this.queryBuilder.build(target, adhocFilters, target.query);
       }
 
-      const esQuery = angular.toJson(queryObj);
+      const esQuery = JSON.stringify(queryObj);
 
       const searchType = queryObj.size === 0 && this.esVersion < 5 ? 'count' : 'query_then_fetch';
       const header = this.getQueryHeader(searchType, options.range.from, options.range.to);
@@ -446,7 +575,8 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
     return ELASTIC_META_FIELDS.includes(fieldName);
   }
 
-  getFields(query: any) {
+  // TODO: instead of being a string, this could be a custom type representing all the elastic types
+  async getFields(type?: string): Promise<MetricFindValue[]> {
     const configuredEsVersion = this.esVersion;
     return this.get('/_mapping').then((result: any) => {
       const typeMap: any = {
@@ -462,17 +592,17 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
         nested: 'nested',
       };
 
-      const shouldAddField = (obj: any, key: string, query: any) => {
+      const shouldAddField = (obj: any, key: string) => {
         if (this.isMetadataField(key)) {
           return false;
         }
 
-        if (!query.type) {
+        if (!type) {
           return true;
         }
 
         // equal query type filter, or via typemap translation
-        return query.type === obj.type || query.type === typeMap[obj.type];
+        return type === obj.type || type === typeMap[obj.type];
       };
 
       // Store subfield names: [system, process, cpu, total] -> system.process.cpu.total
@@ -498,7 +628,7 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
             const fieldName = fieldNameParts.concat(key).join('.');
 
             // Hide meta-fields and check field type
-            if (shouldAddField(subObj, key, query)) {
+            if (shouldAddField(subObj, key)) {
               fields[fieldName] = {
                 text: fieldName,
                 type: subObj.type,
@@ -537,7 +667,7 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
     const range = this.timeSrv.timeRange();
     const searchType = this.esVersion >= 5 ? 'query_then_fetch' : 'count';
     const header = this.getQueryHeader(searchType, range.from, range.to);
-    let esQuery = angular.toJson(this.queryBuilder.getTermsQuery(queryDef));
+    let esQuery = JSON.stringify(this.queryBuilder.getTermsQuery(queryDef));
 
     esQuery = esQuery.replace(/\$timeFrom/g, range.from.valueOf().toString());
     esQuery = esQuery.replace(/\$timeTo/g, range.to.valueOf().toString());
@@ -561,30 +691,24 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
   }
 
   getMultiSearchUrl() {
-    const searchParams = new URLSearchParams();
-
     if (this.esVersion >= 70 && this.maxConcurrentShardRequests) {
-      searchParams.append('max_concurrent_shard_requests', '' + this.maxConcurrentShardRequests);
+      return `_msearch?max_concurrent_shard_requests=${this.maxConcurrentShardRequests}`;
     }
 
-    if (this.esVersion >= 70 && this.includeFrozen) {
-      searchParams.append('ignore_throttled', 'false');
-    }
-
-    return (`_msearch?` + searchParams.toString()).replace(/\?+$/, '');
+    return '_msearch';
   }
 
-  metricFindQuery(query: any) {
-    query = angular.fromJson(query);
+  metricFindQuery(query: string): Promise<MetricFindValue[]> {
+    const parsedQuery = JSON.parse(query);
     if (query) {
-      if (query.find === 'fields') {
-        query.field = this.templateSrv.replace(query.field, {}, 'lucene');
+      if (parsedQuery.find === 'fields') {
+        parsedQuery.field = this.templateSrv.replace(parsedQuery.field, {}, 'lucene');
         return this.getFields(query);
       }
 
-      if (query.find === 'terms') {
-        query.field = this.templateSrv.replace(query.field, {}, 'lucene');
-        query.query = this.templateSrv.replace(query.query || '*', {}, 'lucene');
+      if (parsedQuery.find === 'terms') {
+        parsedQuery.field = this.templateSrv.replace(parsedQuery.field, {}, 'lucene');
+        parsedQuery.query = this.templateSrv.replace(parsedQuery.query || '*', {}, 'lucene');
         return this.getTerms(query);
       }
     }
@@ -593,7 +717,7 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
   }
 
   getTagKeys() {
-    return this.getFields({});
+    return this.getFields();
   }
 
   getTagValues(options: any) {
@@ -667,29 +791,60 @@ export class ElasticDatasource extends DataSourceApi<ElasticsearchQuery, Elastic
  * Exported for tests.
  */
 export function enhanceDataFrame(dataFrame: DataFrame, dataLinks: DataLinkConfig[]) {
-  if (dataLinks.length) {
-    for (const field of dataFrame.fields) {
-      const dataLinkConfig = dataLinks.find(dataLink => field.name && field.name.match(dataLink.field));
-      if (dataLinkConfig) {
-        let link: DataLink;
-        if (dataLinkConfig.datasourceUid) {
-          link = {
-            title: '',
-            url: '',
-            internal: {
-              query: { query: dataLinkConfig.url },
-              datasourceUid: dataLinkConfig.datasourceUid,
-            },
-          };
-        } else {
-          link = {
-            title: '',
-            url: dataLinkConfig.url,
-          };
-        }
-        field.config = field.config || {};
-        field.config.links = [...(field.config.links || []), link];
-      }
-    }
+  const dataSourceSrv = getDataSourceSrv();
+
+  if (!dataLinks.length) {
+    return;
   }
+
+  for (const field of dataFrame.fields) {
+    const dataLinkConfig = dataLinks.find(dataLink => field.name && field.name.match(dataLink.field));
+
+    if (!dataLinkConfig) {
+      continue;
+    }
+
+    let link: DataLink;
+
+    if (dataLinkConfig.datasourceUid) {
+      const dsSettings = dataSourceSrv.getInstanceSettings(dataLinkConfig.datasourceUid);
+
+      link = {
+        title: '',
+        url: '',
+        internal: {
+          query: { query: dataLinkConfig.url },
+          datasourceUid: dataLinkConfig.datasourceUid,
+          datasourceName: dsSettings?.name ?? 'Data source not found',
+        },
+      };
+    } else {
+      link = {
+        title: '',
+        url: dataLinkConfig.url,
+      };
+    }
+
+    field.config = field.config || {};
+    field.config.links = [...(field.config.links || []), link];
+  }
+}
+
+function transformHitsBasedOnDirection(response: any, direction: 'asc' | 'desc') {
+  if (direction === 'desc') {
+    return response;
+  }
+  const actualResponse = response.responses[0];
+  return {
+    ...response,
+    responses: [
+      {
+        ...actualResponse,
+        hits: {
+          ...actualResponse.hits,
+          hits: actualResponse.hits.hits.reverse(),
+        },
+      },
+    ],
+  };
 }

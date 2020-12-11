@@ -133,7 +133,7 @@ func TestLoadingSettings(t *testing.T) {
 			})
 			So(err, ShouldBeNil)
 
-			So(Domain, ShouldEqual, "test2")
+			So(cfg.Domain, ShouldEqual, "test2")
 		})
 
 		Convey("Defaults can be overridden in specified config file", func() {
@@ -215,7 +215,8 @@ func TestLoadingSettings(t *testing.T) {
 			})
 			So(err, ShouldBeNil)
 
-			hostname, _ := os.Hostname()
+			hostname, err := os.Hostname()
+			So(err, ShouldBeNil)
 			So(InstanceName, ShouldEqual, hostname)
 		})
 
@@ -238,7 +239,7 @@ func TestLoadingSettings(t *testing.T) {
 			})
 			So(err, ShouldBeNil)
 
-			So(AuthProxySyncTtl, ShouldEqual, 2)
+			So(cfg.AuthProxySyncTTL, ShouldEqual, 2)
 		})
 
 		Convey("Only ldap_sync_ttl should return the value ldap_sync_ttl", func() {
@@ -249,7 +250,7 @@ func TestLoadingSettings(t *testing.T) {
 			})
 			So(err, ShouldBeNil)
 
-			So(AuthProxySyncTtl, ShouldEqual, 5)
+			So(cfg.AuthProxySyncTTL, ShouldEqual, 5)
 		})
 
 		Convey("ldap_sync should override ldap_sync_ttl that is default value", func() {
@@ -260,7 +261,7 @@ func TestLoadingSettings(t *testing.T) {
 			})
 			So(err, ShouldBeNil)
 
-			So(AuthProxySyncTtl, ShouldEqual, 5)
+			So(cfg.AuthProxySyncTTL, ShouldEqual, 5)
 		})
 
 		Convey("ldap_sync should not override ldap_sync_ttl that is different from default value", func() {
@@ -271,7 +272,7 @@ func TestLoadingSettings(t *testing.T) {
 			})
 			So(err, ShouldBeNil)
 
-			So(AuthProxySyncTtl, ShouldEqual, 12)
+			So(cfg.AuthProxySyncTTL, ShouldEqual, 12)
 		})
 	})
 
@@ -291,7 +292,7 @@ func TestLoadingSettings(t *testing.T) {
 	})
 }
 
-func TestParseAppUrlAndSubUrl(t *testing.T) {
+func TestParseAppURLAndSubURL(t *testing.T) {
 	testCases := []struct {
 		rootURL           string
 		expectedAppURL    string
@@ -315,7 +316,10 @@ func TestParseAppUrlAndSubUrl(t *testing.T) {
 		require.Equal(t, tc.expectedAppSubURL, appSubURL)
 	}
 }
+
 func TestAuthDurationSettings(t *testing.T) {
+	const maxInactiveDaysTest = 240 * time.Hour
+
 	f := ini.Empty()
 	cfg := NewCfg()
 	sec, err := f.NewSection("auth")
@@ -324,7 +328,6 @@ func TestAuthDurationSettings(t *testing.T) {
 	require.NoError(t, err)
 	_, err = sec.NewKey("login_maximum_inactive_lifetime_duration", "")
 	require.NoError(t, err)
-	maxInactiveDaysTest, _ := time.ParseDuration("240h")
 	err = readAuthSettings(f, cfg)
 	require.NoError(t, err)
 	require.Equal(t, maxInactiveDaysTest, cfg.LoginMaxInactiveLifetime)
@@ -334,7 +337,8 @@ func TestAuthDurationSettings(t *testing.T) {
 	require.NoError(t, err)
 	_, err = sec.NewKey("login_maximum_inactive_lifetime_duration", "824h")
 	require.NoError(t, err)
-	maxInactiveDurationTest, _ := time.ParseDuration("824h")
+	maxInactiveDurationTest, err := time.ParseDuration("824h")
+	require.NoError(t, err)
 	err = readAuthSettings(f, cfg)
 	require.NoError(t, err)
 	require.Equal(t, maxInactiveDurationTest, cfg.LoginMaxInactiveLifetime)
@@ -346,7 +350,8 @@ func TestAuthDurationSettings(t *testing.T) {
 	require.NoError(t, err)
 	_, err = sec.NewKey("login_maximum_lifetime_duration", "")
 	require.NoError(t, err)
-	maxLifetimeDaysTest, _ := time.ParseDuration("576h")
+	maxLifetimeDaysTest, err := time.ParseDuration("576h")
+	require.NoError(t, err)
 	err = readAuthSettings(f, cfg)
 	require.NoError(t, err)
 	require.Equal(t, maxLifetimeDaysTest, cfg.LoginMaxLifetime)
@@ -356,7 +361,8 @@ func TestAuthDurationSettings(t *testing.T) {
 	require.NoError(t, err)
 	_, err = sec.NewKey("login_maximum_lifetime_duration", "824h")
 	require.NoError(t, err)
-	maxLifetimeDurationTest, _ := time.ParseDuration("824h")
+	maxLifetimeDurationTest, err := time.ParseDuration("824h")
+	require.NoError(t, err)
 	err = readAuthSettings(f, cfg)
 	require.NoError(t, err)
 	require.Equal(t, maxLifetimeDurationTest, cfg.LoginMaxLifetime)

@@ -12,6 +12,8 @@ export type IconName =
   | 'filter'
   | 'angle-left'
   | 'angle-right'
+  | 'angle-double-right'
+  | 'angle-double-down'
   | 'pen'
   | 'envelope'
   | 'percentage'
@@ -32,6 +34,7 @@ export type IconName =
   | 'exclamation-triangle'
   | 'times'
   | 'signin'
+  | 'signout'
   | 'cloud-upload'
   | 'step-backward'
   | 'square-shape'
@@ -77,6 +80,7 @@ export type IconName =
   | 'compass'
   | 'sliders-v-alt'
   | 'bell'
+  | 'bell-slash'
   | 'database'
   | 'user'
   | 'camera'
@@ -128,6 +132,8 @@ export const getAvailableIcons = (): IconName[] => [
   'filter',
   'angle-left',
   'angle-right',
+  'angle-double-right',
+  'angle-double-down',
   'pen',
   'envelope',
   'percentage',
@@ -193,6 +199,7 @@ export const getAvailableIcons = (): IconName[] => [
   'compass',
   'sliders-v-alt',
   'bell',
+  'bell-slash',
   'database',
   'user',
   'camera',
