@@ -286,6 +286,7 @@ func oddmathbits(m fluent.Matcher) {
 	).Report("odd math/bits expression: use bits.Len*() instead?")
 }
 
+/*
 func floateq(m fluent.Matcher) {
 	m.Match(
 		"$x == $y",
@@ -308,8 +309,8 @@ func floateq(m fluent.Matcher) {
 	m.Match("switch $x { $*_ }", "switch $*_; $x { $*_ }").
 		Where(m["x"].Type.Is("float64")).
 		Report("floating point as switch expression")
-
 }
+*/
 
 func badexponent(m fluent.Matcher) {
 	m.Match(
